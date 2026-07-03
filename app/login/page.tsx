@@ -29,7 +29,7 @@ export default function LoginPage() {
       return;
     }
 
-    router.push("/dashboard");  //router.push is used to navigate to the dashboard page after a successful login
+    router.push("/teams");  //router.push is used to navigate to the teams page after a successful login
   };
 
   const handleSignUp = async () => {
@@ -48,7 +48,7 @@ export default function LoginPage() {
       return;
     }
 
-    router.push("/dashboard");
+    router.push("/teams");
   };
 
   return (

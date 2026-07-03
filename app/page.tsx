@@ -2,10 +2,12 @@ import Link from "next/link";
 
 export default function Home() {
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-slate-100 text-slate-900">
+    <div className="min-h-screen bg-linear-to-br from-slate-50 via-white to-slate-100 text-slate-900">
       <header className="mx-auto flex w-full max-w-6xl items-center justify-between px-6 py-6">
         <span className="text-xl font-semibold tracking-tight">TaskFlow</span>
-        <nav className="text-sm text-slate-600">Your work, perfectly aligned</nav>
+        <nav className="text-sm text-slate-600">
+          Your work, perfectly aligned
+        </nav>
       </header>
 
       <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col px-6 pb-20 pt-10">
@@ -23,7 +25,7 @@ export default function Home() {
             </p>
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
               <Link
-                href="/dashboard"
+                href="/teams"
                 className="inline-flex h-12 items-center justify-center rounded-full bg-slate-900 px-6 text-sm font-semibold text-white transition hover:bg-slate-800"
               >
                 Get Started
