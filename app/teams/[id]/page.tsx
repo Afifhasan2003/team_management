@@ -1,9 +1,840 @@
+"use client";
+
+import Link from "next/link";
+import { useParams, useRouter } from "next/navigation";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type FormEvent,
+} from "react";
+
+import { createClient } from "@/lib/supabase/client";
+
+type TaskStatus = "To-do" | "In Progress" | "Done";   //now TaskStatus can only store one of these three strings 
+
+type Team = {
+  id: string;
+  name: string;
+};
+
+type Task = {
+  id: string;
+  team_id: string;
+  title: string;
+  description: string | null;
+  status: TaskStatus;
+  is_important: boolean;
+  is_urgent: boolean;
+  due_date: string | null;
+  created_at: string;
+};
+
+type TeamMember = {
+  userId: string;
+  label: string;
+};
+
+type TaskAssigneeRow = {
+  task_id: string;
+  user_id: string;
+};
+
+type ProfileRow = {
+  id: string;
+  email?: string | null;    // ? is for optional, meaning it may or may not be present, and | null means it can also be null
+  name?: string | null;
+  full_name?: string | null;
+};
+
+type StatusFilter = "All" | TaskStatus;
+
+const statusOptions: TaskStatus[] = ["To-do", "In Progress", "Done"];
+
+const dbStatusByUi: Record<TaskStatus, string> = {
+  "To-do": "todo",
+  "In Progress": "in_progress",
+  Done: "done",
+};
+
+function uiStatusFromDb(value: string | null | undefined): TaskStatus {
+  const normalized = (value ?? "").toLowerCase().replace(/[\s-]+/g, "_");
+
+  if (normalized === "done") {
+    return "Done";
+  }
+
+  if (normalized === "in_progress") {
+    return "In Progress";
+  }
+
+  return "To-do";
+}
+
+type TaskFormState = {
+  title: string;
+  description: string;
+  status: TaskStatus;
+  isImportant: boolean;
+  isUrgent: boolean;
+  dueDate: string;
+  assigneeIds: string[];
+};
+
+const initialFormState: TaskFormState = {
+  title: "",
+  description: "",
+  status: "To-do",
+  isImportant: false,
+  isUrgent: false,
+  dueDate: "",
+  assigneeIds: [],
+};
+
+//returns some classes to design task approriately
+function statusBadgeClass(status: TaskStatus) {   // status is of type TaskStatus
+  if (status === "Done") {
+    return "bg-emerald-100 text-emerald-700 border-emerald-200";
+  }
+
+  if (status === "In Progress") {
+    return "bg-amber-100 text-amber-700 border-amber-200";
+  }
+
+  return "bg-slate-100 text-slate-700 border-slate-200";
+}
+
+function formatDueDate(dateValue: string | null) {
+  if (!dateValue) {
+    return "No due date";
+  }
+
+  const parsed = new Date(dateValue);
+  if (Number.isNaN(parsed.getTime())) { //if true, then the date is invalid
+    
+    return dateValue;
+  }
+
+  return parsed.toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+}
+
+function toDateInputValue(dateValue: string | null) {
+  if (!dateValue) {
+    return "";
+  }
+
+  const parsed = new Date(dateValue);
+  if (Number.isNaN(parsed.getTime())) {
+    return "";
+  }
+
+  return parsed.toISOString().slice(0, 10);
+}
+
 export default function TeamPage() {
+  const params = useParams<{ id?: string | string[] }>();
+  const teamId = Array.isArray(params?.id) ? params.id[0] : params?.id;
+
+  const router = useRouter();
+  const supabase = useMemo(() => createClient(), []);
+
+  const [team, setTeam] = useState<Team | null>(null);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [taskAssignees, setTaskAssignees] = useState<Record<string, string[]>>({});
+  const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
+
+  const [isLoading, setIsLoading] = useState(true);
+  const [pageError, setPageError] = useState<string | null>(null);
+
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("All");
+  const [importantOnly, setImportantOnly] = useState(false);
+  const [urgentOnly, setUrgentOnly] = useState(false);
+
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
+  const [taskForm, setTaskForm] = useState<TaskFormState>(initialFormState);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
+
+  const assigneeLabelById = useMemo(() => {
+    return teamMembers.reduce<Record<string, string>>((acc, member) => {
+      acc[member.userId] = member.label;
+      return acc;
+    }, {});
+  }, [teamMembers]);
+
+  const loadTeamPage = useCallback(async () => {
+    if (!teamId) {
+      setIsLoading(false);
+      setPageError("Invalid team id.");
+      return;
+    }
+
+    setIsLoading(true);
+    setPageError(null);
+
+    const { data: userData, error: userError } = await supabase.auth.getUser();
+
+    if (userError || !userData.user) {
+      router.push("/login");
+      return;
+    }
+
+    setCurrentUserId(userData.user.id);
+
+    const currentUserEmail = userData.user.email ?? null;
+
+    const { data: memberCheck, error: memberCheckError } = await supabase
+      .from("team_members")
+      .select("team_id")
+      .eq("team_id", teamId)
+      .eq("user_id", userData.user.id)
+      .maybeSingle();
+
+    if (memberCheckError || !memberCheck) {
+      setIsLoading(false);
+      setPageError("You do not have access to this team.");
+      return;
+    }
+
+    const { data: teamData, error: teamError } = await supabase
+      .from("teams")
+      .select("id, name")
+      .eq("id", teamId)
+      .single();
+
+    if (teamError || !teamData) {
+      setIsLoading(false);
+      setPageError("Unable to load team details.");
+      return;
+    }
+
+    setTeam(teamData as Team);
+
+    const { data: membersData, error: membersError } = await supabase
+      .from("team_members")
+      .select("user_id")
+      .eq("team_id", teamId);
+
+    if (membersError) {
+      setIsLoading(false);
+      setPageError("Unable to load team members.");
+      return;
+    }
+
+    const memberUserIds = (membersData ?? [])
+      .map((row) => row.user_id as string)
+      .filter(Boolean);
+
+    const profileById: Record<string, ProfileRow> = {};
+
+    if (memberUserIds.length > 0) {
+      const { data: profilesData, error: profilesError } = await supabase
+        .from("profiles")
+        .select("id, email, name, full_name")
+        .in("id", memberUserIds);
+
+      if (!profilesError && profilesData) {
+        for (const row of profilesData as ProfileRow[]) {
+          profileById[row.id] = row;
+        }
+      }
+    }
+
+    const mappedMembers: TeamMember[] = memberUserIds.map((memberId) => {
+      const profile = profileById[memberId];
+      const label =
+        profile?.full_name?.trim() ||
+        profile?.name?.trim() ||
+        profile?.email?.trim() ||
+        (memberId === userData.user.id ? currentUserEmail : null) ||
+        memberId;
+
+      return {
+        userId: memberId,
+        label,
+      };
+    });
+
+    setTeamMembers(mappedMembers);
+
+    const { data: taskRows, error: taskError } = await supabase
+      .from("tasks")
+      .select(
+        "id, team_id, title, description, status, is_important, is_urgent, due_date, created_at",
+      )
+      .eq("team_id", teamId)
+      .order("created_at", { ascending: false });
+
+    if (taskError) {
+      setIsLoading(false);
+      setPageError("Unable to load tasks.");
+      return;
+    }
+
+    const safeTasks = (taskRows ?? []).map((row) => ({
+      id: row.id as string,
+      team_id: row.team_id as string,
+      title: row.title as string,
+      description: (row.description as string | null) ?? null,
+      status: uiStatusFromDb(row.status as string | null),
+      is_important: Boolean(row.is_important),
+      is_urgent: Boolean(row.is_urgent),
+      due_date: (row.due_date as string | null) ?? null,
+      created_at: (row.created_at as string) ?? "",
+    }));
+
+    setTasks(safeTasks);
+
+    if (safeTasks.length === 0) {
+      setTaskAssignees({});
+      setIsLoading(false);
+      return;
+    }
+
+    const taskIds = safeTasks.map((task) => task.id);
+    const { data: taskAssigneeRows, error: taskAssigneeError } = await supabase
+      .from("task_assignees")
+      .select("task_id, user_id")
+      .in("task_id", taskIds);
+
+    if (taskAssigneeError) {
+      setIsLoading(false);
+      setPageError("Unable to load task assignees.");
+      return;
+    }
+
+    const nextAssignees: Record<string, string[]> = {};
+    for (const row of (taskAssigneeRows ?? []) as TaskAssigneeRow[]) {
+      if (!nextAssignees[row.task_id]) {
+        nextAssignees[row.task_id] = [];
+      }
+      nextAssignees[row.task_id].push(row.user_id);
+    }
+
+    setTaskAssignees(nextAssignees);
+    setIsLoading(false);
+  }, [router, supabase, teamId]);
+
+
+  useEffect(() => {
+    void loadTeamPage();
+  }, [loadTeamPage]);
+
+  const filteredTasks = useMemo(() => {
+    return tasks.filter((task) => {
+      if (statusFilter !== "All" && task.status !== statusFilter) {
+        return false;
+      }
+
+      if (importantOnly && !task.is_important) {
+        return false;
+      }
+
+      if (urgentOnly && !task.is_urgent) {
+        return false;
+      }
+
+      return true;
+    });
+  }, [importantOnly, statusFilter, tasks, urgentOnly]);
+
+  const closeModal = () => {    // modal is a popup window to create or edit a task
+    setIsModalOpen(false);
+    setEditingTaskId(null);
+    setTaskForm(initialFormState);
+    setFormError(null);
+  };
+
+  const openCreateModal = () => { // open the modal (popup window) to create a new task
+    setEditingTaskId(null);
+    setTaskForm(initialFormState);
+    setFormError(null);
+    setIsModalOpen(true);   // this is the actual line that opens the modal 
+  };
+
+  const openEditModal = (task: Task) => {
+    setEditingTaskId(task.id);
+    setTaskForm({
+      title: task.title,
+      description: task.description ?? "",
+      status: task.status,
+      isImportant: task.is_important,
+      isUrgent: task.is_urgent,
+      dueDate: toDateInputValue(task.due_date),
+      assigneeIds: taskAssignees[task.id] ?? [],
+    });
+    setFormError(null);
+    setIsModalOpen(true);
+  };
+
+  const toggleAssignee = (userId: string) => {
+    setTaskForm((prev) => {
+      const exists = prev.assigneeIds.includes(userId);
+
+      return {
+        ...prev,
+        assigneeIds: exists
+          ? prev.assigneeIds.filter((id) => id !== userId)
+          : [...prev.assigneeIds, userId],
+      };
+    });
+  };
+
+  const handleSubmitTask = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setFormError(null);
+
+    if (!teamId) {
+      setFormError("Invalid team id.");
+      return;
+    }
+
+    const title = taskForm.title.trim();
+    if (!title) {
+      setFormError("Title is required.");
+      return;
+    }
+
+    if (!editingTaskId && !currentUserId) {
+      setFormError("Unable to determine task creator. Please refresh and try again.");
+      return;
+    }
+
+    setIsSubmitting(true);
+
+    const payload = {
+      team_id: teamId,
+      title,
+      description: taskForm.description.trim() || null,
+      status: dbStatusByUi[taskForm.status],
+      is_important: taskForm.isImportant,
+      is_urgent: taskForm.isUrgent,
+      due_date: taskForm.dueDate || null,
+    };
+
+    let nextTaskId = editingTaskId;
+
+    if (editingTaskId) {
+      const { error: updateError } = await supabase
+        .from("tasks")
+        .update(payload)
+        .eq("id", editingTaskId)
+        .eq("team_id", teamId);
+
+      if (updateError) {
+        setFormError(updateError.message ?? "Unable to update task.");
+        setIsSubmitting(false);
+        return;
+      }
+
+      const { error: clearAssigneesError } = await supabase
+        .from("task_assignees")
+        .delete()
+        .eq("task_id", editingTaskId);
+
+      if (clearAssigneesError) {
+        setFormError(clearAssigneesError.message ?? "Unable to update assignees.");
+        setIsSubmitting(false);
+        return;
+      }
+    } 
+    else {
+      const createPayload = {
+        ...payload,
+        created_by: currentUserId,
+      };
+
+      const { data: createdTask, error: createError } = await supabase
+        .from("tasks")
+        .insert(createPayload)
+        .select("id")
+        .single();
+
+      if (createError || !createdTask) {
+        setFormError(createError?.message ?? "Unable to create task.");
+        setIsSubmitting(false);
+        return;
+      }
+
+      nextTaskId = createdTask.id as string;
+    }
+
+    if (nextTaskId && taskForm.assigneeIds.length > 0) {
+      const assigneeRows = taskForm.assigneeIds.map((userId) => ({
+        task_id: nextTaskId,
+        user_id: userId,
+      }));
+
+      const { error: assigneeInsertError } = await supabase
+        .from("task_assignees")
+        .insert(assigneeRows);
+
+      if (assigneeInsertError) {
+        setFormError(assigneeInsertError.message ?? "Unable to save assignees.");
+        setIsSubmitting(false);
+        return;
+      }
+    }
+
+    setIsSubmitting(false);
+    closeModal();
+    await loadTeamPage();
+  };
+
+  const handleDeleteTask = async (taskId: string) => {
+
+    const ok = window.confirm("Are you sure you want to delete this task?");
+      //window.confirm is a built-in JavaScript function that displays a dialog box with a specified message, along with an OK and a Cancel button. It returns true if the user clicks OK, and false if the user clicks Cancel.
+    if (!ok) {
+      return;
+    }
+
+    setDeletingTaskId(taskId);
+    setPageError(null);
+
+    const { error: assigneeDeleteError } = await supabase
+      .from("task_assignees")
+      .delete()
+      .eq("task_id", taskId);
+
+    if (assigneeDeleteError) {
+      setPageError(assigneeDeleteError.message ?? "Unable to delete the task.");
+      setDeletingTaskId(null);
+      return;
+    }
+
+    const { error: taskDeleteError } = await supabase
+      .from("tasks")
+      .delete()
+      .eq("id", taskId)
+      .eq("team_id", teamId ?? "");
+
+    if (taskDeleteError) {
+      setPageError(taskDeleteError.message ?? "Unable to delete the task.");
+      setDeletingTaskId(null);
+      return;
+    }
+
+    setDeletingTaskId(null);
+    await loadTeamPage();
+  };
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-slate-50 px-6">
-      <p className="text-lg font-semibold text-slate-900">
-        Team page coming soon
-      </p>
+    <div className="min-h-screen bg-[radial-gradient(120%_120%_at_0%_0%,#fff7ed_0%,#f8fafc_45%,#ecfeff_100%)] text-slate-900">
+      <header className="mx-auto flex w-full max-w-6xl items-center justify-between px-6 py-8">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">
+            Team workspace
+          </p>
+          <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">
+            {team?.name ?? "Team"}
+          </h1>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <Link
+            href="/teams"
+            className="inline-flex h-11 items-center justify-center rounded-full border border-slate-300 bg-white px-5 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
+          >
+            Back to Teams
+          </Link>
+          <button
+            type="button"
+            onClick={openCreateModal}
+            className="inline-flex h-11 items-center justify-center rounded-full bg-slate-900 px-6 text-sm font-semibold text-white transition hover:bg-slate-800"
+          >
+            New Task
+          </button>
+        </div>
+      </header>
+
+      <main className="mx-auto w-full max-w-6xl px-6 pb-20">
+        <section className="rounded-3xl border border-slate-200 bg-white/80 p-6 shadow-sm backdrop-blur sm:p-8">
+          <div className="mb-6 flex flex-col gap-4 border-b border-slate-200 pb-6 sm:flex-row sm:items-center sm:justify-between">
+            {/* status */}
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <label className="text-sm font-medium text-slate-700">
+                Status
+                <select
+                  value={statusFilter}
+                  onChange={(event) => setStatusFilter(event.target.value as StatusFilter)}
+                  className="ml-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
+                >
+                  <option value="All">All</option>
+                  {statusOptions.map((status) => (
+                    <option key={status} value={status}>
+                      {status}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            {/* important and urgent */}
+            <div className="flex items-center gap-4">
+              <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={importantOnly}
+                  onChange={(event) => setImportantOnly(event.target.checked)}
+                  className="h-4 w-4 rounded border-slate-300"
+                />
+                Important only
+              </label>
+
+              <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={urgentOnly}
+                  onChange={(event) => setUrgentOnly(event.target.checked)}
+                  className="h-4 w-4 rounded border-slate-300"
+                />
+                Urgent only
+              </label>
+            </div>
+          </div>
+
+          {isLoading ? (
+            <p className="text-sm text-slate-500">Loading team tasks...</p>
+          ) : pageError ? (
+            <p className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-600">
+              {pageError}
+            </p>
+          ) : filteredTasks.length === 0 ? (
+            <p className="text-base text-slate-600">No tasks match your filters.</p>
+          ) : (
+            <div className="grid gap-4 sm:grid-cols-2">
+              {filteredTasks.map((task) => {
+                const assignees = (taskAssignees[task.id] ?? []).map(
+                  (userId) => assigneeLabelById[userId] ?? userId,
+                );
+
+                return (
+                  
+                  <article   // each task is displayed in an article element
+                    key={task.id}
+                    className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"
+                  >
+                    <div className="flex items-start justify-between gap-4">
+                      <h2 className="text-lg font-semibold text-slate-900">{task.title}</h2>
+                      <span
+                        className={`inline-flex rounded-full border px-3 py-1 text-xs font-semibold ${statusBadgeClass(task.status)}`}
+                      >
+                        {task.status}
+                      </span>
+                    </div>
+
+                    {task.description ? (
+                      <p className="mt-2 text-sm text-slate-600">{task.description}</p>
+                    ) : null}
+
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      {task.is_important ? (
+                        <span className="rounded-full bg-violet-100 px-3 py-1 text-xs font-semibold text-violet-700">
+                          Important
+                        </span>
+                      ) : null}
+                      {task.is_urgent ? (
+                        <span className="rounded-full bg-rose-100 px-3 py-1 text-xs font-semibold text-rose-700">
+                          Urgent
+                        </span>
+                      ) : null}
+                    </div>
+
+                    <div className="mt-4 space-y-2 text-sm text-slate-600">
+                      <p>
+                        <span className="font-semibold text-slate-700">Due:</span>{" "}
+                        {formatDueDate(task.due_date)}
+                      </p>
+                      <p>
+                        <span className="font-semibold text-slate-700">Assignees:</span>{" "}
+                        {assignees.length > 0 ? assignees.join(", ") : "Unassigned"}
+                      </p>
+                    </div>
+
+                    <div className="mt-5 flex gap-3">
+                      <button
+                        type="button"
+                        onClick={() => openEditModal(task)}
+                        className="inline-flex h-10 items-center justify-center rounded-full border border-slate-300 px-5 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleDeleteTask(task.id)}
+                        disabled={deletingTaskId === task.id}
+                        className="inline-flex h-10 items-center justify-center rounded-full bg-rose-600 px-5 text-sm font-semibold text-white transition hover:bg-rose-500 disabled:cursor-not-allowed disabled:bg-rose-300"
+                      >
+                        {deletingTaskId === task.id ? "Deleting..." : "Delete"}
+                      </button>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          )}
+        </section>
+      </main>
+
+      {isModalOpen ? (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-900/40 px-6">
+          <div className="w-full max-w-2xl rounded-3xl border border-slate-200 bg-white p-6 shadow-xl">
+            <div className="space-y-2">
+              <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+                {editingTaskId ? "Edit Task" : "New Task"}
+              </p>
+              <h2 className="text-xl font-semibold text-slate-900">
+                {editingTaskId ? "Update task details" : "Create a new task"}
+              </h2>
+            </div>
+
+            <form onSubmit={handleSubmitTask} className="mt-6 space-y-4">
+              <label className="block text-sm font-medium text-slate-700">
+                Title
+                <input
+                  type="text"
+                  value={taskForm.title}
+                  onChange={(event) =>
+                    setTaskForm((prev) => ({ ...prev, title: event.target.value }))
+                  }
+                  required
+                  className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none"
+                />
+              </label>
+
+              <label className="block text-sm font-medium text-slate-700">
+                Description
+                <textarea
+                  value={taskForm.description}
+                  onChange={(event) =>
+                    setTaskForm((prev) => ({ ...prev, description: event.target.value }))
+                  }
+                  rows={4}
+                  className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none"
+                />
+              </label>
+
+              <div className="grid gap-4 sm:grid-cols-2">
+                <label className="block text-sm font-medium text-slate-700">
+                  Status
+                  <select
+                    value={taskForm.status}
+                    onChange={(event) =>
+                      setTaskForm((prev) => ({
+                        ...prev,
+                        status: event.target.value as TaskStatus,
+                      }))
+                    }
+                    className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm text-slate-900"
+                  >
+                    {statusOptions.map((status) => (
+                      <option key={status} value={status}>
+                        {status}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="block text-sm font-medium text-slate-700">
+                  Due date
+                  <input
+                    type="date"
+                    value={taskForm.dueDate}
+                    onChange={(event) =>
+                      setTaskForm((prev) => ({ ...prev, dueDate: event.target.value }))
+                    }
+                    className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none"
+                  />
+                </label>
+              </div>
+
+              <div className="flex flex-wrap gap-6">
+                <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={taskForm.isImportant}
+                    onChange={(event) =>
+                      setTaskForm((prev) => ({
+                        ...prev,
+                        isImportant: event.target.checked,
+                      }))
+                    }
+                    className="h-4 w-4 rounded border-slate-300"
+                  />
+                  Important
+                </label>
+
+                <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={taskForm.isUrgent}
+                    onChange={(event) =>
+                      setTaskForm((prev) => ({ ...prev, isUrgent: event.target.checked }))
+                    }
+                    className="h-4 w-4 rounded border-slate-300"
+                  />
+                  Urgent
+                </label>
+              </div>
+
+              <fieldset className="rounded-2xl border border-slate-200 p-4">
+                <legend className="px-1 text-sm font-semibold text-slate-700">Assignees</legend>
+                {teamMembers.length === 0 ? (
+                  <p className="text-sm text-slate-500">No team members found.</p>
+                ) : (
+                  <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                    {teamMembers.map((member) => (
+                      <label
+                        key={member.userId}
+                        className="inline-flex items-center gap-2 text-sm text-slate-700"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={taskForm.assigneeIds.includes(member.userId)}
+                          onChange={() => toggleAssignee(member.userId)}
+                          className="h-4 w-4 rounded border-slate-300"
+                        />
+                        {member.label}
+                      </label>
+                    ))}
+                  </div>
+                )}
+              </fieldset>
+
+              {formError ? (
+                <p className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-2 text-sm text-rose-600">
+                  {formError}
+                </p>
+              ) : null}
+
+              <div className="flex flex-col gap-3 sm:flex-row sm:justify-end">
+                <button
+                  type="button"
+                  onClick={closeModal}
+                  className="inline-flex h-11 items-center justify-center rounded-full border border-slate-300 px-6 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmitting}
+                  className="inline-flex h-11 items-center justify-center rounded-full bg-slate-900 px-6 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
+                >
+                  {isSubmitting ? "Saving..." : editingTaskId ? "Save Changes" : "Create Task"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
