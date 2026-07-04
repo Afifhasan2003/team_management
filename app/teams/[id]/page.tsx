@@ -17,6 +17,7 @@ type TaskStatus = "To-do" | "In Progress" | "Done";   //now TaskStatus can only 
 type Team = {
   id: string;
   name: string;
+  invite_code: string;
 };
 
 type Task = {
@@ -29,6 +30,18 @@ type Task = {
   is_urgent: boolean;
   due_date: string | null;
   created_at: string;
+};
+
+type TaskRow = {
+  id: string;
+  team_id: string;
+  title: string;
+  description: string | null;
+  status: string | null;
+  is_important: boolean | null;
+  is_urgent: boolean | null;
+  due_date: string | null;
+  created_at: string | null;
 };
 
 type TeamMember = {
@@ -49,6 +62,7 @@ type ProfileRow = {
 };
 
 type StatusFilter = "All" | TaskStatus;
+type AddMemberMode = "email" | "code";
 
 const statusOptions: TaskStatus[] = ["To-do", "In Progress", "Done"];
 
@@ -136,6 +150,20 @@ function toDateInputValue(dateValue: string | null) {
   return parsed.toISOString().slice(0, 10);
 }
 
+function taskFromRow(row: TaskRow): Task {
+  return {
+    id: row.id,
+    team_id: row.team_id,
+    title: row.title,
+    description: row.description ?? null,
+    status: uiStatusFromDb(row.status),
+    is_important: Boolean(row.is_important),
+    is_urgent: Boolean(row.is_urgent),
+    due_date: row.due_date ?? null,
+    created_at: row.created_at ?? "",
+  };
+}
+
 export default function TeamPage() {
   const params = useParams<{ id?: string | string[] }>();
   const teamId = Array.isArray(params?.id) ? params.id[0] : params?.id;
@@ -162,6 +190,14 @@ export default function TeamPage() {
   const [formError, setFormError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
+
+  const [isAddMemberOpen, setIsAddMemberOpen] = useState(false);
+  const [addMemberMode, setAddMemberMode] = useState<AddMemberMode>("email");
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteError, setInviteError] = useState<string | null>(null);
+  const [inviteSuccess, setInviteSuccess] = useState<string | null>(null);
+  const [isAddingMember, setIsAddingMember] = useState(false);
+  const [copyInviteStatus, setCopyInviteStatus] = useState<"idle" | "copied" | "error">("idle");
 
   const assigneeLabelById = useMemo(() => {
     return teamMembers.reduce<Record<string, string>>((acc, member) => {
@@ -206,7 +242,7 @@ export default function TeamPage() {
 
     const { data: teamData, error: teamError } = await supabase
       .from("teams")
-      .select("id, name")
+      .select("id, name, invite_code")
       .eq("id", teamId)
       .single();
 
@@ -279,17 +315,7 @@ export default function TeamPage() {
       return;
     }
 
-    const safeTasks = (taskRows ?? []).map((row) => ({
-      id: row.id as string,
-      team_id: row.team_id as string,
-      title: row.title as string,
-      description: (row.description as string | null) ?? null,
-      status: uiStatusFromDb(row.status as string | null),
-      is_important: Boolean(row.is_important),
-      is_urgent: Boolean(row.is_urgent),
-      due_date: (row.due_date as string | null) ?? null,
-      created_at: (row.created_at as string) ?? "",
-    }));
+    const safeTasks = ((taskRows ?? []) as TaskRow[]).map(taskFromRow);
 
     setTasks(safeTasks);
 
@@ -328,6 +354,64 @@ export default function TeamPage() {
     void loadTeamPage();
   }, [loadTeamPage]);
 
+  useEffect(() => {
+    if (!teamId) {
+      return;
+    }
+
+    const channel = supabase
+      .channel(`team-tasks-${teamId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "tasks",
+          filter: `team_id=eq.${teamId}`,
+        },
+        (payload) => {
+          if (payload.eventType === "INSERT") {
+            const newTask = taskFromRow(payload.new as TaskRow);
+
+            setTasks((prevTasks) => [
+              newTask,
+              ...prevTasks.filter((task) => task.id !== newTask.id),
+            ]);
+            return;
+          }
+
+          if (payload.eventType === "UPDATE") {
+            const updatedTask = taskFromRow(payload.new as TaskRow);
+
+            setTasks((prevTasks) =>
+              prevTasks.map((task) => (task.id === updatedTask.id ? updatedTask : task)),
+            );
+            return;
+          }
+
+          if (payload.eventType === "DELETE") {
+            const deletedTaskId = (payload.old as Partial<TaskRow>).id;
+
+            if (!deletedTaskId) {
+              return;
+            }
+
+            setTasks((prevTasks) => prevTasks.filter((task) => task.id !== deletedTaskId));
+            setTaskAssignees((prevAssignees) => {
+              const nextAssignees = { ...prevAssignees };
+              delete nextAssignees[deletedTaskId];
+              return nextAssignees;
+            });
+          }
+        },
+      )
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [supabase, teamId]);
+
   const filteredTasks = useMemo(() => {
     return tasks.filter((task) => {
       if (statusFilter !== "All" && task.status !== statusFilter) {
@@ -358,6 +442,24 @@ export default function TeamPage() {
     setTaskForm(initialFormState);
     setFormError(null);
     setIsModalOpen(true);   // this is the actual line that opens the modal 
+  };
+
+  const openAddMemberModal = () => {
+    setAddMemberMode("email");
+    setInviteEmail("");
+    setInviteError(null);
+    setInviteSuccess(null);
+    setCopyInviteStatus("idle");
+    setIsAddMemberOpen(true);
+  };
+
+  const closeAddMemberModal = () => {
+    setIsAddMemberOpen(false);
+    setInviteEmail("");
+    setInviteError(null);
+    setInviteSuccess(null);
+    setCopyInviteStatus("idle");
+    setIsAddingMember(false);
   };
 
   const openEditModal = (task: Task) => {
@@ -527,6 +629,84 @@ export default function TeamPage() {
     await loadTeamPage();
   };
 
+  const handleAddMemberByEmail = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setInviteError(null);
+    setInviteSuccess(null);
+
+    if (!teamId) {
+      setInviteError("Invalid team id.");
+      return;
+    }
+
+    const email = inviteEmail.trim().toLowerCase();
+    if (!email) {
+      setInviteError("Email is required.");
+      return;
+    }
+
+    setIsAddingMember(true);
+
+    const { data: profile, error: profileError } = await supabase
+      .from("profiles")
+      .select("id, email, name, full_name")
+      .ilike("email", email)
+      .maybeSingle();
+
+    if (profileError) {
+      setInviteError("Unable to find that person right now.");
+      setIsAddingMember(false);
+      return;
+    }
+
+    if (!profile) {
+      setInviteError("No account was found for that email. Share the invite code instead.");
+      setIsAddingMember(false);
+      return;
+    }
+
+    const { error: memberError } = await supabase.from("team_members").insert({
+      team_id: teamId,
+      user_id: (profile as ProfileRow).id,
+    });
+
+    if (memberError) {
+      if (memberError.code === "23505") {
+        setInviteError("That person is already a member of this team.");
+      } else {
+        setInviteError(memberError.message ?? "Unable to add that member.");
+      }
+      setIsAddingMember(false);
+      return;
+    }
+
+    const addedProfile = profile as ProfileRow;
+    const addedLabel =
+      addedProfile.full_name?.trim() ||
+      addedProfile.name?.trim() ||
+      addedProfile.email?.trim() ||
+      email;
+
+    setInviteEmail("");
+    setInviteSuccess(`${addedLabel} was added to the team.`);
+    setIsAddingMember(false);
+    await loadTeamPage();
+  };
+
+  const handleCopyTeamInviteCode = async () => {
+    if (!team?.invite_code) {
+      setCopyInviteStatus("error");
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(team.invite_code);
+      setCopyInviteStatus("copied");
+    } catch {
+      setCopyInviteStatus("error");
+    }
+  };
+
   return (
     <div className="min-h-screen bg-[radial-gradient(120%_120%_at_0%_0%,#fff7ed_0%,#f8fafc_45%,#ecfeff_100%)] text-slate-900">
       <header className="mx-auto flex w-full max-w-6xl items-center justify-between px-6 py-8">
@@ -546,6 +726,13 @@ export default function TeamPage() {
           >
             Back to Teams
           </Link>
+          <button
+            type="button"
+            onClick={openAddMemberModal}
+            className="inline-flex h-11 items-center justify-center rounded-full border border-slate-300 bg-white px-5 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
+          >
+            Add Member
+          </button>
           <button
             type="button"
             onClick={openCreateModal}
@@ -683,6 +870,134 @@ export default function TeamPage() {
           )}
         </section>
       </main>
+
+      {isAddMemberOpen ? (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-900/40 px-6">
+          <div className="w-full max-w-lg rounded-3xl border border-slate-200 bg-white p-6 shadow-xl">
+            <div className="space-y-2">
+              <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+                Add Member
+              </p>
+              <h2 className="text-xl font-semibold text-slate-900">
+                Invite people to {team?.name ?? "this team"}
+              </h2>
+            </div>
+
+            <div className="mt-6 grid grid-cols-2 rounded-2xl border border-slate-200 bg-slate-50 p-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setAddMemberMode("email");
+                  setInviteError(null);
+                  setInviteSuccess(null);
+                  setCopyInviteStatus("idle");
+                }}
+                className={`h-10 rounded-xl text-sm font-semibold transition ${
+                  addMemberMode === "email"
+                    ? "bg-white text-slate-950 shadow-sm"
+                    : "text-slate-500 hover:text-slate-800"
+                }`}
+              >
+                Add by Email
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setAddMemberMode("code");
+                  setInviteError(null);
+                  setInviteSuccess(null);
+                  setCopyInviteStatus("idle");
+                }}
+                className={`h-10 rounded-xl text-sm font-semibold transition ${
+                  addMemberMode === "code"
+                    ? "bg-white text-slate-950 shadow-sm"
+                    : "text-slate-500 hover:text-slate-800"
+                }`}
+              >
+                Invite Code
+              </button>
+            </div>
+
+            {addMemberMode === "email" ? (
+              <form onSubmit={handleAddMemberByEmail} className="mt-6 space-y-4">
+                <label className="block text-sm font-medium text-slate-700">
+                  Email address
+                  <input
+                    type="email"
+                    value={inviteEmail}
+                    onChange={(event) => setInviteEmail(event.target.value)}
+                    placeholder="teammate@example.com"
+                    className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none"
+                  />
+                </label>
+
+                {inviteError ? (
+                  <p className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-2 text-sm text-rose-600">
+                    {inviteError}
+                  </p>
+                ) : null}
+
+                {inviteSuccess ? (
+                  <p className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm text-emerald-700">
+                    {inviteSuccess}
+                  </p>
+                ) : null}
+
+                <div className="flex flex-col gap-3 sm:flex-row sm:justify-end">
+                  <button
+                    type="button"
+                    onClick={closeAddMemberModal}
+                    className="inline-flex h-11 items-center justify-center rounded-full border border-slate-300 px-6 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isAddingMember}
+                    className="inline-flex h-11 items-center justify-center rounded-full bg-slate-900 px-6 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
+                  >
+                    {isAddingMember ? "Adding..." : "Add Member"}
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <div className="mt-6 space-y-4">
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                  <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">
+                    Invite code
+                  </p>
+                  <p className="mt-2 break-all font-mono text-3xl font-semibold tracking-[0.2em] text-slate-950">
+                    {team?.invite_code ?? "Unavailable"}
+                  </p>
+                </div>
+
+                {copyInviteStatus === "error" ? (
+                  <p className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-2 text-sm text-rose-600">
+                    Unable to copy the invite code. Please copy it manually.
+                  </p>
+                ) : null}
+
+                <div className="flex flex-col gap-3 sm:flex-row sm:justify-end">
+                  <button
+                    type="button"
+                    onClick={closeAddMemberModal}
+                    className="inline-flex h-11 items-center justify-center rounded-full border border-slate-300 px-6 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
+                  >
+                    Done
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleCopyTeamInviteCode}
+                    className="inline-flex h-11 items-center justify-center rounded-full bg-slate-900 px-6 text-sm font-semibold text-white transition hover:bg-slate-800"
+                  >
+                    {copyInviteStatus === "copied" ? "Copied" : "Copy Invite Code"}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      ) : null}
 
       {isModalOpen ? (
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-900/40 px-6">
