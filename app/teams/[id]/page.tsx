@@ -13,6 +13,7 @@ import {
 import { createClient } from "@/lib/supabase/client";
 
 type TaskStatus = "To-do" | "In Progress" | "Done";   //now TaskStatus can only store one of these three strings 
+type RecurrenceType = "none" | "daily" | "weekly";
 
 type Team = {
   id: string;
@@ -29,6 +30,7 @@ type Task = {
   is_important: boolean;
   is_urgent: boolean;
   due_date: string | null;
+  recurrence_type: RecurrenceType;
   created_at: string;
 };
 
@@ -41,6 +43,7 @@ type TaskRow = {
   is_important: boolean | null;
   is_urgent: boolean | null;
   due_date: string | null;
+  recurrence_type?: string | null;
   created_at: string | null;
 };
 
@@ -62,9 +65,15 @@ type ProfileRow = {
 };
 
 type StatusFilter = "All" | TaskStatus;
+type RecurringFilter = "all" | "daily" | "weekly";
 type AddMemberMode = "email" | "code";
 
 const statusOptions: TaskStatus[] = ["To-do", "In Progress", "Done"];
+const recurrenceOptions: { label: string; value: RecurrenceType }[] = [
+  { label: "Does not repeat", value: "none" },
+  { label: "Daily", value: "daily" },
+  { label: "Weekly", value: "weekly" },
+];
 
 const dbStatusByUi: Record<TaskStatus, string> = {
   "To-do": "todo",
@@ -86,6 +95,37 @@ function uiStatusFromDb(value: string | null | undefined): TaskStatus {
   return "To-do";
 }
 
+function recurrenceFromDb(value: string | null | undefined): RecurrenceType {
+  if (value === "daily" || value === "weekly") {
+    return value;
+  }
+
+  return "none";
+}
+
+function recurrenceLabel(value: RecurrenceType) {
+  if (value === "daily") {
+    return "Daily";
+  }
+
+  if (value === "weekly") {
+    return "Weekly";
+  }
+
+  return "Does not repeat";
+}
+
+function isMissingRecurrenceColumnError(error: { code?: string; message?: string }) {
+  const message = error.message?.toLowerCase() ?? "";
+
+  return (
+    error.code === "PGRST204" ||
+    message.includes("recurrence_type") ||
+    message.includes("'recurrence_type'") ||
+    message.includes("column tasks.recurrence_type")
+  );
+}
+
 type TaskFormState = {
   title: string;
   description: string;
@@ -93,6 +133,7 @@ type TaskFormState = {
   isImportant: boolean;
   isUrgent: boolean;
   dueDate: string;
+  recurrenceType: RecurrenceType;
   assigneeIds: string[];
 };
 
@@ -103,6 +144,7 @@ const initialFormState: TaskFormState = {
   isImportant: false,
   isUrgent: false,
   dueDate: "",
+  recurrenceType: "none",
   assigneeIds: [],
 };
 
@@ -160,6 +202,7 @@ function taskFromRow(row: TaskRow): Task {
     is_important: Boolean(row.is_important),
     is_urgent: Boolean(row.is_urgent),
     due_date: row.due_date ?? null,
+    recurrence_type: recurrenceFromDb(row.recurrence_type),
     created_at: row.created_at ?? "",
   };
 }
@@ -179,8 +222,10 @@ export default function TeamPage() {
 
   const [isLoading, setIsLoading] = useState(true);
   const [pageError, setPageError] = useState<string | null>(null);
+  const [isRecurrenceAvailable, setIsRecurrenceAvailable] = useState(true);
 
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("All");
+  const [recurringFilter, setRecurringFilter] = useState<RecurringFilter>("all");
   const [importantOnly, setImportantOnly] = useState(false);
   const [urgentOnly, setUrgentOnly] = useState(false);
 
@@ -302,13 +347,34 @@ export default function TeamPage() {
 
     setTeamMembers(mappedMembers);
 
-    const { data: taskRows, error: taskError } = await supabase
+    const taskResult = await supabase
       .from("tasks")
       .select(
-        "id, team_id, title, description, status, is_important, is_urgent, due_date, created_at",
+        "id, team_id, title, description, status, is_important, is_urgent, due_date, recurrence_type, created_at",
       )
       .eq("team_id", teamId)
       .order("created_at", { ascending: false });
+
+    let taskRows = (taskResult.data ?? null) as TaskRow[] | null;
+    let taskError = taskResult.error;
+
+    if (taskError && isMissingRecurrenceColumnError(taskError)) {
+      setIsRecurrenceAvailable(false);
+      setRecurringFilter("all");
+
+      const fallback = await supabase
+        .from("tasks")
+        .select(
+          "id, team_id, title, description, status, is_important, is_urgent, due_date, created_at",
+        )
+        .eq("team_id", teamId)
+        .order("created_at", { ascending: false });
+
+      taskRows = (fallback.data ?? null) as TaskRow[] | null;
+      taskError = fallback.error;
+    } else {
+      setIsRecurrenceAvailable(true);
+    }
 
     if (taskError) {
       setIsLoading(false);
@@ -427,9 +493,13 @@ export default function TeamPage() {
         return false;
       }
 
+      if (recurringFilter !== "all" && task.recurrence_type !== recurringFilter) {
+        return false;
+      }
+
       return true;
     });
-  }, [importantOnly, statusFilter, tasks, urgentOnly]);
+  }, [importantOnly, recurringFilter, statusFilter, tasks, urgentOnly]);
 
   const closeModal = () => {    // modal is a popup window to create or edit a task
     setIsModalOpen(false);
@@ -472,6 +542,7 @@ export default function TeamPage() {
       isImportant: task.is_important,
       isUrgent: task.is_urgent,
       dueDate: toDateInputValue(task.due_date),
+      recurrenceType: task.recurrence_type,
       assigneeIds: taskAssignees[task.id] ?? [],
     });
     setFormError(null);
@@ -523,14 +594,31 @@ export default function TeamPage() {
       due_date: taskForm.dueDate || null,
     };
 
+    const taskPayload = isRecurrenceAvailable
+      ? { ...payload, recurrence_type: taskForm.recurrenceType }
+      : payload;
+
     let nextTaskId = editingTaskId;
 
     if (editingTaskId) {
-      const { error: updateError } = await supabase
+      let { error: updateError } = await supabase
         .from("tasks")
-        .update(payload)
+        .update(taskPayload)
         .eq("id", editingTaskId)
         .eq("team_id", teamId);
+
+      if (updateError && isMissingRecurrenceColumnError(updateError)) {
+        setIsRecurrenceAvailable(false);
+        setRecurringFilter("all");
+
+        const fallbackUpdate = await supabase
+          .from("tasks")
+          .update(payload)
+          .eq("id", editingTaskId)
+          .eq("team_id", teamId);
+
+        updateError = fallbackUpdate.error;
+      }
 
       if (updateError) {
         setFormError(updateError.message ?? "Unable to update task.");
@@ -551,15 +639,32 @@ export default function TeamPage() {
     } 
     else {
       const createPayload = {
-        ...payload,
+        ...taskPayload,
         created_by: currentUserId,
       };
 
-      const { data: createdTask, error: createError } = await supabase
+      let { data: createdTask, error: createError } = await supabase
         .from("tasks")
         .insert(createPayload)
         .select("id")
         .single();
+
+      if (createError && isMissingRecurrenceColumnError(createError)) {
+        setIsRecurrenceAvailable(false);
+        setRecurringFilter("all");
+
+        const fallbackCreate = await supabase
+          .from("tasks")
+          .insert({
+            ...payload,
+            created_by: currentUserId,
+          })
+          .select("id")
+          .single();
+
+        createdTask = fallbackCreate.data;
+        createError = fallbackCreate.error;
+      }
 
       if (createError || !createdTask) {
         setFormError(createError?.message ?? "Unable to create task.");
@@ -792,6 +897,22 @@ export default function TeamPage() {
                   ))}
                 </select>
               </label>
+
+              <label className="text-sm font-medium text-slate-700">
+                Recurring
+                <select
+                  value={recurringFilter}
+                  disabled={!isRecurrenceAvailable}
+                  onChange={(event) =>
+                    setRecurringFilter(event.target.value as RecurringFilter)
+                  }
+                  className="ml-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <option value="all">All tasks</option>
+                  <option value="daily">Daily recurring</option>
+                  <option value="weekly">Weekly recurring</option>
+                </select>
+              </label>
             </div>
             {/* important and urgent */}
             <div className="flex items-center gap-4">
@@ -816,6 +937,13 @@ export default function TeamPage() {
               </label>
             </div>
           </div>
+
+          {!isRecurrenceAvailable ? (
+            <p className="mb-6 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
+              Recurring task fields are waiting on the database migration. Existing
+              tasks are shown, but daily and weekly recurrence cannot be saved yet.
+            </p>
+          ) : null}
 
           {isLoading ? (
             <p className="text-sm text-slate-500">Loading team tasks...</p>
@@ -860,6 +988,11 @@ export default function TeamPage() {
                       {task.is_urgent ? (
                         <span className="rounded-full bg-rose-100 px-3 py-1 text-xs font-semibold text-rose-700">
                           Urgent
+                        </span>
+                      ) : null}
+                      {task.recurrence_type !== "none" ? (
+                        <span className="rounded-full bg-cyan-100 px-3 py-1 text-xs font-semibold text-cyan-700">
+                          {recurrenceLabel(task.recurrence_type)}
                         </span>
                       ) : null}
                     </div>
@@ -1117,6 +1250,27 @@ export default function TeamPage() {
                     }
                     className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none"
                   />
+                </label>
+
+                <label className="block text-sm font-medium text-slate-700">
+                  Recurring
+                  <select
+                    value={taskForm.recurrenceType}
+                    disabled={!isRecurrenceAvailable}
+                    onChange={(event) =>
+                      setTaskForm((prev) => ({
+                        ...prev,
+                        recurrenceType: event.target.value as RecurrenceType,
+                      }))
+                    }
+                    className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm text-slate-900 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {recurrenceOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
                 </label>
               </div>
 
