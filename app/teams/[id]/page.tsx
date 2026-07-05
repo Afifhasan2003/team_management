@@ -284,6 +284,9 @@ export default function TeamPage() {
   const [inviteSuccess, setInviteSuccess] = useState<string | null>(null);
   const [isAddingMember, setIsAddingMember] = useState(false);
   const [copyInviteStatus, setCopyInviteStatus] = useState<"idle" | "copied" | "error">("idle");
+  const [isDeleteTeamOpen, setIsDeleteTeamOpen] = useState(false);
+  const [isDeletingTeam, setIsDeletingTeam] = useState(false);
+  const [deleteConfirmName, setDeleteConfirmName] = useState("");
 
   const assigneeLabelById = useMemo(() => {
     return teamMembers.reduce<Record<string, string>>((acc, member) => {
@@ -775,6 +778,91 @@ export default function TeamPage() {
     await loadTeamPage();
   };
 
+  const handleDeleteTeam = async () => {
+    if (!teamId || !team) {
+      return;
+    }
+
+    if (deleteConfirmName !== team.name) {
+      setPageError("Confirmation name does not match the team name.");
+      return;
+    }
+
+    setIsDeletingTeam(true);
+    setPageError(null);
+
+    // 1. Get task IDs for this team to delete their assignees
+    const { data: taskIdsData, error: fetchTasksError } = await supabase
+      .from("tasks")
+      .select("id")
+      .eq("team_id", teamId);
+
+    if (fetchTasksError) {
+      setPageError(fetchTasksError.message ?? "Unable to fetch team tasks for deletion.");
+      setIsDeletingTeam(false);
+      return;
+    }
+
+    const taskIds = taskIdsData?.map((t) => t.id) ?? [];
+
+    // 2. Delete task assignees
+    if (taskIds.length > 0) {
+      const { error: assigneeDeleteError } = await supabase
+        .from("task_assignees")
+        .delete()
+        .in("task_id", taskIds);
+
+      if (assigneeDeleteError) {
+        setPageError(assigneeDeleteError.message ?? "Unable to delete task assignees.");
+        setIsDeletingTeam(false);
+        return;
+      }
+    }
+
+    // 3. Delete tasks
+    const { error: tasksDeleteError } = await supabase
+      .from("tasks")
+      .delete()
+      .eq("team_id", teamId);
+
+    if (tasksDeleteError) {
+      setPageError(tasksDeleteError.message ?? "Unable to delete team tasks.");
+      setIsDeletingTeam(false);
+      return;
+    }
+
+    // 4. Delete team members
+    const { error: membersDeleteError } = await supabase
+      .from("team_members")
+      .delete()
+      .eq("team_id", teamId);
+
+    if (membersDeleteError) {
+      setPageError(membersDeleteError.message ?? "Unable to delete team members.");
+      setIsDeletingTeam(false);
+      return;
+    }
+
+    // 5. Delete the team itself
+    const { error: teamDeleteError } = await supabase
+      .from("teams")
+      .delete()
+      .eq("id", teamId);
+
+    if (teamDeleteError) {
+      setPageError(teamDeleteError.message ?? "Unable to delete the team.");
+      setIsDeletingTeam(false);
+      return;
+    }
+
+    setIsDeletingTeam(false);
+    setIsDeleteTeamOpen(false);
+    setDeleteConfirmName("");
+
+    // Redirect to teams list page
+    router.push("/teams");
+  };
+
   const handleUpdateTaskStatus = async (task: Task, nextStatus: TaskStatus) => {
     if (!teamId || task.status === nextStatus) {
       return;
@@ -956,6 +1044,13 @@ export default function TeamPage() {
           >
             Back to Teams
           </Link>
+          <button
+            type="button"
+            onClick={() => setIsDeleteTeamOpen(true)}
+            className="inline-flex h-11 items-center justify-center rounded-full border border-rose-200 bg-white px-5 text-sm font-semibold text-rose-600 transition hover:bg-rose-50"
+          >
+            Delete Team
+          </button>
           <button
             type="button"
             onClick={openAddMemberModal}
@@ -1446,6 +1541,58 @@ export default function TeamPage() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      ) : null}
+
+      {isDeleteTeamOpen ? (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-900/40 px-6">
+          <div className="w-full max-w-md rounded-3xl border border-slate-200 bg-white p-6 shadow-xl">
+            <div className="space-y-2">
+              <p className="text-xs font-semibold uppercase tracking-[0.3em] text-rose-500">
+                Delete Team
+              </p>
+              <h2 className="text-xl font-semibold text-slate-900">
+                Are you absolutely sure?
+              </h2>
+              <p className="text-sm text-slate-500">
+                This action is permanent and cannot be undone. It will delete the team **{team?.name}**, all of its tasks, and remove all team members.
+              </p>
+            </div>
+
+            <div className="mt-6 space-y-4">
+              <label className="block text-sm font-medium text-slate-700">
+                Please type <span className="font-semibold text-slate-900">"{team?.name}"</span> to confirm:
+                <input
+                  type="text"
+                  value={deleteConfirmName}
+                  onChange={(event) => setDeleteConfirmName(event.target.value)}
+                  placeholder={team?.name}
+                  className="mt-2 w-full rounded-2xl border border-slate-200 px-4 py-2 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none"
+                />
+              </label>
+
+              <div className="flex flex-col gap-3 sm:flex-row">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsDeleteTeamOpen(false);
+                    setDeleteConfirmName("");
+                  }}
+                  className="inline-flex h-11 flex-1 items-center justify-center rounded-full border border-slate-300 px-6 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDeleteTeam}
+                  disabled={isDeletingTeam || deleteConfirmName !== team?.name}
+                  className="inline-flex h-11 flex-1 items-center justify-center rounded-full bg-rose-600 px-6 text-sm font-semibold text-white transition hover:bg-rose-500 disabled:cursor-not-allowed disabled:bg-rose-300"
+                >
+                  {isDeletingTeam ? "Deleting..." : "Delete Team"}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       ) : null}
