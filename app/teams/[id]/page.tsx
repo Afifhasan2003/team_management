@@ -523,6 +523,12 @@ export default function TeamPage() {
   }, [supabase, teamId]);
 
   const filteredTasks = useMemo(() => {
+    const today = new Date();
+    const y = today.getFullYear();
+    const m = String(today.getMonth() + 1).padStart(2, "0");
+    const d = String(today.getDate()).padStart(2, "0");
+    const todayStr = `${y}-${m}-${d}`;
+
     return tasks.filter((task) => {
       if (statusFilter !== "All" && task.status !== statusFilter) {
         return false;
@@ -537,6 +543,16 @@ export default function TeamPage() {
       }
 
       if (recurringFilter !== "all" && task.recurrence_type !== recurringFilter) {
+        return false;
+      }
+
+      // Hide future recurring tasks from active list until their due date
+      if (
+        task.status !== "Done" &&
+        task.recurrence_type !== "none" &&
+        task.due_date &&
+        todayStr < task.due_date
+      ) {
         return false;
       }
 
@@ -1011,6 +1027,109 @@ export default function TeamPage() {
     await loadTeamPage();
   };
 
+  const renderTaskCard = (task: Task, assignees: string[]) => {
+    return (
+      <article
+        key={task.id}
+        className={`rounded-2xl border p-5 shadow-sm transition ${
+          task.status === "Done"
+            ? "border-slate-100 bg-slate-50/60 opacity-80"
+            : "border-slate-200 bg-white"
+        }`}
+      >
+        <div className="flex items-start justify-between gap-4">
+          <h2 className={`text-lg font-semibold ${task.status === "Done" ? "text-slate-450 line-through" : "text-slate-900"}`}>{task.title}</h2>
+          <span
+            className={`inline-flex rounded-full border px-3 py-1 text-xs font-semibold ${statusBadgeClass(task.status)}`}
+          >
+            {task.status}
+          </span>
+        </div>
+
+        {task.description ? (
+          <p className={`mt-2 text-sm ${task.status === "Done" ? "text-slate-400" : "text-slate-600"}`}>{task.description}</p>
+        ) : null}
+
+        <div className="mt-4 flex flex-wrap gap-2">
+          {task.is_important ? (
+            <span className={`rounded-full px-3 py-1 text-xs font-semibold ${task.status === "Done" ? "bg-slate-100 text-slate-500" : "bg-violet-100 text-violet-700"}`}>
+              Important
+            </span>
+          ) : null}
+          {task.is_urgent ? (
+            <span className={`rounded-full px-3 py-1 text-xs font-semibold ${task.status === "Done" ? "bg-slate-100 text-slate-500" : "bg-rose-100 text-rose-700"}`}>
+              Urgent
+            </span>
+          ) : null}
+          {task.recurrence_type !== "none" ? (
+            <span className={`rounded-full px-3 py-1 text-xs font-semibold ${task.status === "Done" ? "bg-slate-100 text-slate-500" : "bg-cyan-100 text-cyan-700"}`}>
+              {recurrenceLabel(task.recurrence_type)}
+            </span>
+          ) : null}
+        </div>
+
+        <div className="mt-4 space-y-2 text-sm text-slate-600">
+          <p>
+            <span className="font-semibold text-slate-700">Due:</span>{" "}
+            {formatDueDate(task.due_date)}
+          </p>
+          <p>
+            <span className="font-semibold text-slate-700">Assignees:</span>{" "}
+            {assignees.length > 0 ? assignees.join(", ") : "Unassigned"}
+          </p>
+        </div>
+
+        <div className="mt-5 flex flex-wrap gap-3">
+          {task.status === "To-do" ? (
+            <button
+              type="button"
+              onClick={() => void handleUpdateTaskStatus(task, "In Progress")}
+              disabled={updatingStatusTaskId === task.id}
+              className="inline-flex h-10 items-center justify-center rounded-full bg-amber-600 px-5 text-sm font-semibold text-white transition hover:bg-amber-500 disabled:cursor-not-allowed disabled:bg-amber-300"
+            >
+              {updatingStatusTaskId === task.id ? "Updating..." : "Mark In Progress"}
+            </button>
+          ) : null}
+          {task.status !== "Done" ? (
+            <button
+              type="button"
+              onClick={() => void handleUpdateTaskStatus(task, "Done")}
+              disabled={updatingStatusTaskId === task.id}
+              className="inline-flex h-10 items-center justify-center rounded-full bg-emerald-600 px-5 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:bg-emerald-300"
+            >
+              {updatingStatusTaskId === task.id ? "Updating..." : "Mark Completed"}
+            </button>
+          ) : null}
+          {task.status === "Done" ? (
+            <button
+              type="button"
+              onClick={() => void handleUpdateTaskStatus(task, "To-do")}
+              disabled={updatingStatusTaskId === task.id}
+              className="inline-flex h-10 items-center justify-center rounded-full border border-slate-300 bg-white px-5 text-sm font-semibold text-slate-700 transition hover:bg-slate-100 disabled:cursor-not-allowed"
+            >
+              {updatingStatusTaskId === task.id ? "Updating..." : "Reopen Task"}
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => openEditModal(task)}
+            className="inline-flex h-10 items-center justify-center rounded-full border border-slate-300 px-5 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
+          >
+            Edit
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleDeleteTask(task.id)}
+            disabled={deletingTaskId === task.id}
+            className="inline-flex h-10 items-center justify-center rounded-full bg-rose-600 px-5 text-sm font-semibold text-white transition hover:bg-rose-500 disabled:cursor-not-allowed disabled:bg-rose-300"
+          >
+            {deletingTaskId === task.id ? "Deleting..." : "Delete"}
+          </button>
+        </div>
+      </article>
+    );
+  };
+
   const handleCopyTeamInviteCode = async () => {
     if (!team?.invite_code) {
       setCopyInviteStatus("error");
@@ -1145,100 +1264,52 @@ export default function TeamPage() {
           ) : filteredTasks.length === 0 ? (
             <p className="text-base text-slate-600">No tasks match your filters.</p>
           ) : (
-            <div className="grid gap-4 sm:grid-cols-2">
-              {filteredTasks.map((task) => {
-                const assignees = (taskAssignees[task.id] ?? []).map(
-                  (userId) => assigneeLabelById[userId] ?? userId,
-                );
+            <div className="space-y-12">
+              {/* Active Tasks Section */}
+              <div>
+                <h3 className="text-lg font-bold text-slate-800 mb-5 flex items-center gap-2">
+                  <span>Active Tasks</span>
+                  <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-semibold text-slate-600">
+                    {filteredTasks.filter((t) => t.status !== "Done").length}
+                  </span>
+                </h3>
+                {filteredTasks.filter((t) => t.status !== "Done").length === 0 ? (
+                  <p className="text-sm text-slate-500">No active tasks.</p>
+                ) : (
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    {filteredTasks
+                      .filter((t) => t.status !== "Done")
+                      .map((task) => {
+                        const assignees = (taskAssignees[task.id] ?? []).map(
+                          (userId) => assigneeLabelById[userId] ?? userId,
+                        );
+                        return renderTaskCard(task, assignees);
+                      })}
+                  </div>
+                )}
+              </div>
 
-                return (
-                  
-                  <article   // each task is displayed in an article element
-                    key={task.id}
-                    className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"
-                  >
-                    <div className="flex items-start justify-between gap-4">
-                      <h2 className="text-lg font-semibold text-slate-900">{task.title}</h2>
-                      <span
-                        className={`inline-flex rounded-full border px-3 py-1 text-xs font-semibold ${statusBadgeClass(task.status)}`}
-                      >
-                        {task.status}
-                      </span>
-                    </div>
-
-                    {task.description ? (
-                      <p className="mt-2 text-sm text-slate-600">{task.description}</p>
-                    ) : null}
-
-                    <div className="mt-4 flex flex-wrap gap-2">
-                      {task.is_important ? (
-                        <span className="rounded-full bg-violet-100 px-3 py-1 text-xs font-semibold text-violet-700">
-                          Important
-                        </span>
-                      ) : null}
-                      {task.is_urgent ? (
-                        <span className="rounded-full bg-rose-100 px-3 py-1 text-xs font-semibold text-rose-700">
-                          Urgent
-                        </span>
-                      ) : null}
-                      {task.recurrence_type !== "none" ? (
-                        <span className="rounded-full bg-cyan-100 px-3 py-1 text-xs font-semibold text-cyan-700">
-                          {recurrenceLabel(task.recurrence_type)}
-                        </span>
-                      ) : null}
-                    </div>
-
-                    <div className="mt-4 space-y-2 text-sm text-slate-600">
-                      <p>
-                        <span className="font-semibold text-slate-700">Due:</span>{" "}
-                        {formatDueDate(task.due_date)}
-                      </p>
-                      <p>
-                        <span className="font-semibold text-slate-700">Assignees:</span>{" "}
-                        {assignees.length > 0 ? assignees.join(", ") : "Unassigned"}
-                      </p>
-                    </div>
-
-                    <div className="mt-5 flex flex-wrap gap-3">
-                      {task.status === "To-do" ? (
-                        <button
-                          type="button"
-                          onClick={() => void handleUpdateTaskStatus(task, "In Progress")}
-                          disabled={updatingStatusTaskId === task.id}
-                          className="inline-flex h-10 items-center justify-center rounded-full bg-amber-600 px-5 text-sm font-semibold text-white transition hover:bg-amber-500 disabled:cursor-not-allowed disabled:bg-amber-300"
-                        >
-                          {updatingStatusTaskId === task.id ? "Updating..." : "Mark In Progress"}
-                        </button>
-                      ) : null}
-                      {task.status !== "Done" ? (
-                        <button
-                          type="button"
-                          onClick={() => void handleUpdateTaskStatus(task, "Done")}
-                          disabled={updatingStatusTaskId === task.id}
-                          className="inline-flex h-10 items-center justify-center rounded-full bg-emerald-600 px-5 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:bg-emerald-300"
-                        >
-                          {updatingStatusTaskId === task.id ? "Updating..." : "Mark Completed"}
-                        </button>
-                      ) : null}
-                      <button
-                        type="button"
-                        onClick={() => openEditModal(task)}
-                        className="inline-flex h-10 items-center justify-center rounded-full border border-slate-300 px-5 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
-                      >
-                        Edit
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void handleDeleteTask(task.id)}
-                        disabled={deletingTaskId === task.id}
-                        className="inline-flex h-10 items-center justify-center rounded-full bg-rose-600 px-5 text-sm font-semibold text-white transition hover:bg-rose-500 disabled:cursor-not-allowed disabled:bg-rose-300"
-                      >
-                        {deletingTaskId === task.id ? "Deleting..." : "Delete"}
-                      </button>
-                    </div>
-                  </article>
-                );
-              })}
+              {/* Separator & Completed Tasks Section */}
+              {filteredTasks.filter((t) => t.status === "Done").length > 0 && (
+                <div className="border-t border-slate-100 pt-10">
+                  <h3 className="text-lg font-bold text-slate-800 mb-5 flex items-center gap-2">
+                    <span>Completed Tasks</span>
+                    <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-semibold text-emerald-700">
+                      {filteredTasks.filter((t) => t.status === "Done").length}
+                    </span>
+                  </h3>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    {filteredTasks
+                      .filter((t) => t.status === "Done")
+                      .map((task) => {
+                        const assignees = (taskAssignees[task.id] ?? []).map(
+                          (userId) => assigneeLabelById[userId] ?? userId,
+                        );
+                        return renderTaskCard(task, assignees);
+                      })}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </section>
