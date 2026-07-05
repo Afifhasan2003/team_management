@@ -137,16 +137,25 @@ type TaskFormState = {
   assigneeIds: string[];
 };
 
-const initialFormState: TaskFormState = {
+const getTomorrowDateString = () => {
+  const tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const y = tomorrow.getFullYear();
+  const m = String(tomorrow.getMonth() + 1).padStart(2, "0");
+  const d = String(tomorrow.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+};
+
+const getInitialFormState = (): TaskFormState => ({
   title: "",
   description: "",
   status: "To-do",
   isImportant: false,
   isUrgent: false,
-  dueDate: "",
+  dueDate: getTomorrowDateString(),
   recurrenceType: "none",
   assigneeIds: [],
-};
+});
 
 //returns some classes to design task approriately
 function statusBadgeClass(status: TaskStatus) {   // status is of type TaskStatus
@@ -192,6 +201,37 @@ function toDateInputValue(dateValue: string | null) {
   return parsed.toISOString().slice(0, 10);
 }
 
+function calculateNextDueDate(currentDueDateStr: string | null, recurrenceType: RecurrenceType): string {
+  let year: number;
+  let month: number;
+  let day: number;
+
+  if (currentDueDateStr && /^\d{4}-\d{2}-\d{2}$/.test(currentDueDateStr)) {
+    const parts = currentDueDateStr.split("-");
+    year = parseInt(parts[0], 10);
+    month = parseInt(parts[1], 10) - 1; // 0-based
+    day = parseInt(parts[2], 10);
+  } else {
+    const today = new Date();
+    year = today.getFullYear();
+    month = today.getMonth();
+    day = today.getDate();
+  }
+
+  const date = new Date(year, month, day);
+  if (recurrenceType === "daily") {
+    date.setDate(date.getDate() + 1);
+  } else if (recurrenceType === "weekly") {
+    date.setDate(date.getDate() + 7);
+  }
+
+  // Format as YYYY-MM-DD using local timezone coordinates
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
 function taskFromRow(row: TaskRow): Task {
   return {
     id: row.id,
@@ -231,7 +271,7 @@ export default function TeamPage() {
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
-  const [taskForm, setTaskForm] = useState<TaskFormState>(initialFormState);
+  const [taskForm, setTaskForm] = useState<TaskFormState>(getInitialFormState);
   const [formError, setFormError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
@@ -504,13 +544,13 @@ export default function TeamPage() {
   const closeModal = () => {    // modal is a popup window to create or edit a task
     setIsModalOpen(false);
     setEditingTaskId(null);
-    setTaskForm(initialFormState);
+    setTaskForm(getInitialFormState());
     setFormError(null);
   };
 
   const openCreateModal = () => { // open the modal (popup window) to create a new task
     setEditingTaskId(null);
-    setTaskForm(initialFormState);
+    setTaskForm(getInitialFormState());
     setFormError(null);
     setIsModalOpen(true);   // this is the actual line that opens the modal 
   };
@@ -743,9 +783,22 @@ export default function TeamPage() {
     setUpdatingStatusTaskId(task.id);
     setPageError(null);
 
+    const isCompletedRecurring =
+      nextStatus === "Done" &&
+      task.recurrence_type !== "none" &&
+      isRecurrenceAvailable;
+
+    const updatePayload: { status: string; recurrence_type?: string } = {
+      status: dbStatusByUi[nextStatus],
+    };
+
+    if (isCompletedRecurring) {
+      updatePayload.recurrence_type = "none";
+    }
+
     const { error } = await supabase
       .from("tasks")
-      .update({ status: dbStatusByUi[nextStatus] })
+      .update(updatePayload)
       .eq("id", task.id)
       .eq("team_id", teamId);
 
@@ -755,11 +808,54 @@ export default function TeamPage() {
       return;
     }
 
-    setTasks((prevTasks) =>
-      prevTasks.map((currentTask) =>
-        currentTask.id === task.id ? { ...currentTask, status: nextStatus } : currentTask,
-      ),
-    );
+    if (isCompletedRecurring) {
+      const nextDueDate = calculateNextDueDate(task.due_date, task.recurrence_type);
+      const nextPayload = {
+        team_id: teamId,
+        title: task.title,
+        description: task.description,
+        status: "todo",
+        is_important: task.is_important,
+        is_urgent: task.is_urgent,
+        due_date: nextDueDate,
+        recurrence_type: task.recurrence_type,
+        created_by: currentUserId,
+      };
+
+      const { data: createdTask, error: createError } = await supabase
+        .from("tasks")
+        .insert(nextPayload)
+        .select("id")
+        .single();
+
+      if (createError) {
+        setPageError(createError.message ?? "Unable to create next recurring task.");
+      } else if (createdTask) {
+        const originalAssignees = taskAssignees[task.id] ?? [];
+        if (originalAssignees.length > 0) {
+          const assigneePayloads = originalAssignees.map((userId) => ({
+            task_id: createdTask.id,
+            user_id: userId,
+          }));
+
+          const { error: assigneesError } = await supabase
+            .from("task_assignees")
+            .insert(assigneePayloads);
+
+          if (assigneesError) {
+            setPageError(assigneesError.message ?? "Unable to copy assignees to the next recurring task.");
+          }
+        }
+      }
+
+      await loadTeamPage();
+    } else {
+      setTasks((prevTasks) =>
+        prevTasks.map((currentTask) =>
+          currentTask.id === task.id ? { ...currentTask, status: nextStatus } : currentTask,
+        ),
+      );
+    }
     setUpdatingStatusTaskId(null);
   };
 
