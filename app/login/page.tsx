@@ -11,11 +11,17 @@ export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [pendingAction, setPendingAction] = useState<"login" | "signup" | null>(
+    null,
+  );
 
   const handleLogin = async () => {
     setError(null);
+    setMessage(null);
     setIsSubmitting(true);
+    setPendingAction("login");
 
     const { error: authError } = await supabase.auth.signInWithPassword({
       email,
@@ -23,6 +29,7 @@ export default function LoginPage() {
     });
 
     setIsSubmitting(false);
+    setPendingAction(null);
 
     if (authError) {
       setError(authError.message);
@@ -34,21 +41,29 @@ export default function LoginPage() {
 
   const handleSignUp = async () => {
     setError(null);
+    setMessage(null);
     setIsSubmitting(true);
+    setPendingAction("signup");
 
-    const { error: authError } = await supabase.auth.signUp({
+    const { data, error: authError } = await supabase.auth.signUp({
       email,
       password,
     });
 
     setIsSubmitting(false);
+    setPendingAction(null);
 
     if (authError) {
       setError(authError.message);
       return;
     }
 
-    router.push("/teams");
+    if (!data.session) {
+      setMessage("Check your email to confirm your account before signing in.");
+      return;
+    }
+
+    router.push("/dashboard");
   };
 
   return (
@@ -95,22 +110,34 @@ export default function LoginPage() {
             </p>
           ) : null}
 
+          {message ? (
+            <p className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+              {message}
+            </p>
+          ) : null}
+
           <div className="flex flex-col gap-3 sm:flex-row">
             <button
               type="button"
               onClick={handleLogin}
               disabled={isSubmitting}
-              className="inline-flex h-11 flex-1 items-center justify-center rounded-full bg-slate-900 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
+              className="inline-flex h-11 flex-1 cursor-pointer items-center justify-center gap-2 rounded-full bg-slate-900 text-sm font-semibold text-white transition hover:bg-slate-800 active:scale-[0.98] disabled:cursor-not-allowed disabled:bg-slate-400 disabled:opacity-50"
             >
-              Login
+              {pendingAction === "login" ? (
+                <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+              ) : null}
+              {pendingAction === "login" ? "Signing in..." : "Login"}
             </button>
             <button
               type="button"
               onClick={handleSignUp}
               disabled={isSubmitting}
-              className="inline-flex h-11 flex-1 items-center justify-center rounded-full border border-slate-300 text-sm font-semibold text-slate-700 transition hover:bg-slate-100 disabled:cursor-not-allowed"
+              className="inline-flex h-11 flex-1 cursor-pointer items-center justify-center gap-2 rounded-full border border-slate-300 text-sm font-semibold text-slate-700 transition hover:bg-slate-100 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
             >
-              Sign Up
+              {pendingAction === "signup" ? (
+                <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-400/40 border-t-slate-700" />
+              ) : null}
+              {pendingAction === "signup" ? "Signing up..." : "Sign Up"}
             </button>
           </div>
         </div>
