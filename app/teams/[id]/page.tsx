@@ -77,7 +77,7 @@ const recurrenceOptions: { label: string; value: RecurrenceType }[] = [
 
 const dbStatusByUi: Record<TaskStatus, string> = {
   "To-do": "todo",
-  "In Progress": "in_progress",
+  "In Progress": "inprogress",
   Done: "done",
 };
 
@@ -88,7 +88,7 @@ function uiStatusFromDb(value: string | null | undefined): TaskStatus {
     return "Done";
   }
 
-  if (normalized === "in_progress") {
+  if (normalized === "inprogress" || normalized === "in_progress") {
     return "In Progress";
   }
 
