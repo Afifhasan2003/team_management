@@ -17,6 +17,11 @@ type TeamMemberRow = {
   teams: Team | null;
 };
 
+type TaskStatusRow = {
+  team_id: string;
+  status: string | null;
+};
+
 const inviteAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";  // Exclude easily confused characters like I, O, 1, and 0
 
 function generateInviteCode() {
@@ -25,12 +30,18 @@ function generateInviteCode() {
   return Array.from(bytes, (byte) => inviteAlphabet[byte % inviteAlphabet.length]).join("");
 }
 
+function isPendingTask(status: string | null | undefined) {
+  const normalized = (status ?? "").toLowerCase().replace(/[\s-]+/g, "_");
+  return normalized !== "done";
+}
+
 export default function TeamsPage() {
   const router = useRouter();
   const supabase = useMemo(() => createClient(), []);
 
   const [userId, setUserId] = useState<string | null>(null);
   const [teams, setTeams] = useState<Team[]>([]);
+  const [pendingTaskCounts, setPendingTaskCounts] = useState<Record<string, number>>({});
   const [isLoading, setIsLoading] = useState(true);
   const [pageError, setPageError] = useState<string | null>(null);
 
@@ -72,6 +83,7 @@ export default function TeamsPage() {
 
     if (error) {
       setTeams([]);
+      setPendingTaskCounts({});
       setPageError("Unable to load your teams right now.");
     } else {
       const mappedTeams = (data ?? [])  // if data is null or undefined, use an empty array instead, null would give error while maping
@@ -79,6 +91,33 @@ export default function TeamsPage() {
         .filter((team): team is Team => Boolean(team));
           //after this all mappedTeams is guaranteed to be of type Team, and not null
       setTeams(mappedTeams);
+
+      const teamIds = mappedTeams.map((team) => team.id);
+      if (teamIds.length === 0) {
+        setPendingTaskCounts({});
+      } else {
+        const { data: taskRows, error: taskError } = await supabase
+          .from("tasks")
+          .select("team_id, status")
+          .in("team_id", teamIds);
+
+        if (taskError) {
+          setPendingTaskCounts({});
+        } else {
+          const nextCounts = teamIds.reduce<Record<string, number>>((acc, teamId) => {
+            acc[teamId] = 0;
+            return acc;
+          }, {});
+
+          for (const task of (taskRows ?? []) as TaskStatusRow[]) {
+            if (isPendingTask(task.status)) {
+              nextCounts[task.team_id] = (nextCounts[task.team_id] ?? 0) + 1;
+            }
+          }
+
+          setPendingTaskCounts(nextCounts);
+        }
+      }
     }
 
     setIsLoading(false);
@@ -276,6 +315,10 @@ export default function TeamsPage() {
                     </p>
                     <p className="text-lg font-semibold text-slate-900">
                       {team.name}
+                    </p>
+                    <p className="mt-2 text-sm font-medium text-slate-500">
+                      {pendingTaskCounts[team.id] ?? 0} pending{" "}
+                      {(pendingTaskCounts[team.id] ?? 0) === 1 ? "task" : "tasks"}
                     </p>
                   </div>
                   <Link

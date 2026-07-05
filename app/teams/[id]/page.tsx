@@ -190,6 +190,7 @@ export default function TeamPage() {
   const [formError, setFormError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
+  const [updatingStatusTaskId, setUpdatingStatusTaskId] = useState<string | null>(null);
 
   const [isAddMemberOpen, setIsAddMemberOpen] = useState(false);
   const [addMemberMode, setAddMemberMode] = useState<AddMemberMode>("email");
@@ -629,6 +630,34 @@ export default function TeamPage() {
     await loadTeamPage();
   };
 
+  const handleUpdateTaskStatus = async (task: Task, nextStatus: TaskStatus) => {
+    if (!teamId || task.status === nextStatus) {
+      return;
+    }
+
+    setUpdatingStatusTaskId(task.id);
+    setPageError(null);
+
+    const { error } = await supabase
+      .from("tasks")
+      .update({ status: dbStatusByUi[nextStatus] })
+      .eq("id", task.id)
+      .eq("team_id", teamId);
+
+    if (error) {
+      setPageError(error.message ?? "Unable to update task status.");
+      setUpdatingStatusTaskId(null);
+      return;
+    }
+
+    setTasks((prevTasks) =>
+      prevTasks.map((currentTask) =>
+        currentTask.id === task.id ? { ...currentTask, status: nextStatus } : currentTask,
+      ),
+    );
+    setUpdatingStatusTaskId(null);
+  };
+
   const handleAddMemberByEmail = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setInviteError(null);
@@ -846,7 +875,27 @@ export default function TeamPage() {
                       </p>
                     </div>
 
-                    <div className="mt-5 flex gap-3">
+                    <div className="mt-5 flex flex-wrap gap-3">
+                      {task.status === "To-do" ? (
+                        <button
+                          type="button"
+                          onClick={() => void handleUpdateTaskStatus(task, "In Progress")}
+                          disabled={updatingStatusTaskId === task.id}
+                          className="inline-flex h-10 items-center justify-center rounded-full bg-amber-600 px-5 text-sm font-semibold text-white transition hover:bg-amber-500 disabled:cursor-not-allowed disabled:bg-amber-300"
+                        >
+                          {updatingStatusTaskId === task.id ? "Updating..." : "Mark In Progress"}
+                        </button>
+                      ) : null}
+                      {task.status !== "Done" ? (
+                        <button
+                          type="button"
+                          onClick={() => void handleUpdateTaskStatus(task, "Done")}
+                          disabled={updatingStatusTaskId === task.id}
+                          className="inline-flex h-10 items-center justify-center rounded-full bg-emerald-600 px-5 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:bg-emerald-300"
+                        >
+                          {updatingStatusTaskId === task.id ? "Updating..." : "Mark Completed"}
+                        </button>
+                      ) : null}
                       <button
                         type="button"
                         onClick={() => openEditModal(task)}
