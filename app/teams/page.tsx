@@ -58,6 +58,56 @@ export default function TeamsPage() {
   const [joinError, setJoinError] = useState<string | null>(null);
   const [isJoinSubmitting, setIsJoinSubmitting] = useState(false);
 
+  const [profileUsername, setProfileUsername] = useState<string | null>(null);
+  const [showUsernameModal, setShowUsernameModal] = useState(false);
+  const [newUsername, setNewUsername] = useState("");
+  const [usernameError, setUsernameError] = useState<string | null>(null);
+  const [isSavingUsername, setIsSavingUsername] = useState(false);
+  const [isEditMode, setIsEditMode] = useState(false);
+
+  const handleSaveUsername = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setUsernameError(null);
+
+    const username = newUsername.trim().toLowerCase();
+    if (!/^[a-zA-Z0-9_]{3,20}$/.test(username)) {
+      setUsernameError("Username must be between 3 and 20 characters and contain only letters, numbers, or underscores.");
+      return;
+    }
+
+    if (!userId) {
+      setUsernameError("You must be logged in to set your username.");
+      return;
+    }
+
+    setIsSavingUsername(true);
+
+    const { data: currentUserData } = await supabase.auth.getUser();
+    const email = currentUserData?.user?.email ?? null;
+
+    const { error } = await supabase
+      .from("profiles")
+      .upsert({
+        id: userId,
+        username,
+        email,
+        updated_at: new Date().toISOString(),
+      });
+
+    setIsSavingUsername(false);
+
+    if (error) {
+      setUsernameError(error.message.includes("profiles_username_key") || error.message.toLowerCase().includes("unique")
+        ? "This username is already taken. Please choose a different one."
+        : error.message || "Unable to save username.");
+    } else {
+      setProfileUsername(username);
+      setShowUsernameModal(false);
+      setIsEditMode(false);
+      setNewUsername("");
+    }
+  };
+
   const loadTeams = useCallback(async () => {
     setIsLoading(true);
     setPageError(null);
@@ -72,6 +122,18 @@ export default function TeamsPage() {
     }
 
     setUserId(userData.user.id);
+
+    const { data: profile, error: profileError } = await supabase
+      .from("profiles")
+      .select("username")
+      .eq("id", userData.user.id)
+      .maybeSingle();
+
+    if (!profileError && profile?.username) {
+      setProfileUsername(profile.username);
+    } else {
+      setShowUsernameModal(true);
+    }
 
     const { data, error } = await supabase
       .from("team_members")
@@ -265,7 +327,24 @@ export default function TeamsPage() {
             Teams
           </h1>
         </div>
-        <div className="flex flex-col gap-3 sm:flex-row">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+          {profileUsername && (
+            <div className="flex items-center gap-2 rounded-full border border-slate-200 bg-white/80 px-4 py-1.5 shadow-xs text-sm backdrop-blur">
+              <span className="font-semibold text-slate-700">@{profileUsername}</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setNewUsername(profileUsername);
+                  setUsernameError(null);
+                  setIsEditMode(true);
+                  setShowUsernameModal(true);
+                }}
+                className="text-xs text-slate-500 hover:text-slate-900 font-medium cursor-pointer"
+              >
+                Edit
+              </button>
+            </div>
+          )}
           <button
             type="button"
             onClick={() => {
@@ -478,6 +557,71 @@ export default function TeamsPage() {
                   className="inline-flex h-11 flex-1 items-center justify-center rounded-full bg-slate-900 px-6 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
                 >
                   Join
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      ) : null}
+
+      {showUsernameModal ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 px-6 backdrop-blur-[2px]">
+          <div className="w-full max-w-md rounded-3xl border border-slate-200 bg-white p-6 shadow-xl">
+            <div className="space-y-2">
+              <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+                Profile Setup
+              </p>
+              <h2 className="text-xl font-semibold text-slate-900">
+                {isEditMode ? "Update your username" : "Choose a username"}
+              </h2>
+              {!isEditMode && (
+                <p className="text-sm text-slate-500">
+                  Every user must have a unique username. Other team members will see you by this username.
+                </p>
+              )}
+            </div>
+
+            <form onSubmit={handleSaveUsername} className="mt-6 space-y-4">
+              <label className="block text-sm font-medium text-slate-700">
+                Username
+                <div className="relative mt-2 flex items-center">
+                  <span className="absolute left-4 text-slate-400 font-semibold text-sm">@</span>
+                  <input
+                    type="text"
+                    value={newUsername}
+                    onChange={(event) => setNewUsername(event.target.value)}
+                    placeholder="username"
+                    required
+                    className="w-full rounded-2xl border border-slate-200 pl-8 pr-4 py-2.5 text-sm text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none"
+                  />
+                </div>
+              </label>
+
+              {usernameError ? (
+                <p className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-2 text-sm text-rose-600">
+                  {usernameError}
+                </p>
+              ) : null}
+
+              <div className="flex flex-col gap-3 sm:flex-row sm:justify-end">
+                {isEditMode && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowUsernameModal(false);
+                      setIsEditMode(false);
+                    }}
+                    className="inline-flex h-11 flex-1 items-center justify-center rounded-full border border-slate-300 px-6 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
+                  >
+                    Cancel
+                  </button>
+                )}
+                <button
+                  type="submit"
+                  disabled={isSavingUsername}
+                  className="inline-flex h-11 flex-1 items-center justify-center rounded-full bg-slate-900 px-6 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
+                >
+                  {isSavingUsername ? "Saving..." : "Save Username"}
                 </button>
               </div>
             </form>
